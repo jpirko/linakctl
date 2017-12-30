@@ -1,0 +1,118 @@
+#!/usr/bin/env python
+
+"""
+Ultra dummy script to control Linak table
+
+Copyright (c) 2017 Jiri Pirko <jiri@resnulli.us>
+Licensed under the GNU General Public License, version 2 as
+published by the Free Software Foundation; see LICENSE for details.
+"""
+
+__author__ = """
+jiri@resnulli.us (Jiri Pirko)
+"""
+
+import sys
+import struct
+import time
+import usb.core
+import usb.util
+
+U2L_STATUS_MOVE_FLAGS_DIR = 1 << 7
+U2L_MOVE_START_DELAY = 5
+
+class U2lStatus:
+
+    def __init__(self, status_tuple):
+        (height, move_flags, move_magic, target_height) = status_tuple
+        self.height = height
+        self.moving = bool(move_magic)
+        if self.moving:
+            self.target_height = target_height
+            self.moving_up = bool(move_flags & U2L_STATUS_MOVE_FLAGS_DIR)
+
+    def __str__(self):
+        if self.moving:
+            return "%u/%u, moving %s" % (self.height,
+                                         self.target_height,
+                                         "down" if self.moving_up else "up")
+        else:
+            return "%u, stopped" % (self.height)
+
+class U2l:
+    def __init__(self, dev):
+        self._dev = dev
+        self._cmd_hello()
+        self._cmd_init()
+
+    def _cmd_hello(self):
+        self._dev.ctrl_transfer(0x21, 0x0a, 0, 0, None)
+
+    def _cmd_init(self):
+        init_struct = struct.Struct("<L60x")
+        msg = init_struct.pack(0xfb000403)
+        self._dev.ctrl_transfer(0x21, 0x09, 0x0303, 0, msg)
+
+    def _cmd_move(self, height):
+        move_struct = struct.Struct("<BHHHH59x")
+        msg = move_struct.pack(0x05, height, height, height, height)
+        self._dev.ctrl_transfer(0x21, 0x09, 0x0305, 0, msg)
+
+    def _cmd_status(self):
+        status_struct = struct.Struct("<4xHBB12xH42x")
+        msg = self._dev.ctrl_transfer(0xa1, 0x01, 0x0304, 0, status_struct.size)
+        return U2lStatus(status_struct.unpack(msg))
+
+    def move(self, height):
+	if height < 0 or height > 0xFFFF:
+            print >> sys.stderr, "Invalid height value \"%d\"" % height
+            sys.exit(1)
+
+        self._cmd_move(height)
+        self._cmd_move(height)
+
+        status = self._cmd_status()
+        move_started = False
+
+        iteration = 0
+        while True:
+            time.sleep(0.100)
+            status = self._cmd_status()
+            if not move_started:
+                if status.moving:
+                    move_started = True
+	        elif iteration > U2L_MOVE_START_DELAY:
+                    print >> sys.stderr, "Move start timed-out"
+                    sys.exit(1)
+	    elif not status.moving:
+		return
+            self._cmd_move(height)
+            iteration += 1
+
+    def status(self):
+        return self._cmd_status()
+
+def main():
+    dev = usb.core.find(idVendor=0x12d3, idProduct=0x0002)
+    if dev is None:
+        print >> sys.stderr, "Device not found"
+        sys.exit(1)
+
+    if dev.is_kernel_driver_active(0) is True:
+        dev.detach_kernel_driver(0)
+
+    dev.set_configuration()
+
+    u2l = U2l(dev)
+
+    try:
+        height = int(sys.argv[1])
+    except IndexError:
+        print u2l.status()
+        sys.exit(0)
+
+    u2l.move(height)
+    sys.exit(0)
+
+if __name__ == "__main__":
+    main()
